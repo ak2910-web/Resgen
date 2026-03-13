@@ -1,11 +1,36 @@
 import type {
   FormField,
   GeneratedResponse,
-  ResponseMode,
+  SyntheticProfile,
+  OptionWeights,
 } from "./types";
+import { getProfile, SYNTHETIC_PROFILES } from "./syntheticProfiles";
 
 // ---------------------------------------------------------------------------
-// Random helpers
+// Weighted random selection
+// ---------------------------------------------------------------------------
+
+/**
+ * Picks an item from `items` according to the provided weight map.
+ * Items not in the map get a default weight of 1.
+ */
+function weightedChoice(items: string[], weights?: OptionWeights): string {
+  if (!weights || Object.keys(weights).length === 0) {
+    return items[Math.floor(Math.random() * items.length)];
+  }
+
+  const totalWeight = items.reduce((sum, item) => sum + (weights[item] ?? 1), 0);
+  let rand = Math.random() * totalWeight;
+
+  for (const item of items) {
+    rand -= weights[item] ?? 1;
+    if (rand <= 0) return item;
+  }
+  return items[items.length - 1];
+}
+
+// ---------------------------------------------------------------------------
+// Pure random helpers
 // ---------------------------------------------------------------------------
 
 function randomInt(min: number, max: number): number {
@@ -17,16 +42,8 @@ function randomChoice<T>(arr: T[]): T {
 }
 
 const RANDOM_SHORT_ANSWERS = [
-  "Yes",
-  "No",
-  "Maybe",
-  "Definitely",
-  "Not sure",
-  "Absolutely",
-  "It depends",
-  "Of course",
-  "Never",
-  "Sometimes",
+  "Yes", "No", "Maybe", "Definitely", "Not sure",
+  "Absolutely", "It depends", "Of course", "Never", "Sometimes",
 ];
 
 const RANDOM_PARAGRAPHS = [
@@ -38,27 +55,6 @@ const RANDOM_PARAGRAPHS = [
   "This has been a positive experience and I look forward to seeing the results.",
   "The process could be improved, but it is generally effective.",
   "I appreciate the effort that has gone into making this work.",
-];
-
-const RANDOM_NAMES = [
-  "Alex Johnson",
-  "Sam Williams",
-  "Jordan Brown",
-  "Taylor Davis",
-  "Morgan Wilson",
-  "Casey Miller",
-  "Riley Moore",
-  "Avery Taylor",
-  "Blake Anderson",
-  "Cameron Thomas",
-];
-
-const RANDOM_EMAILS = [
-  "user@example.com",
-  "test@sample.org",
-  "respondent@mail.com",
-  "participant@domain.net",
-  "member@site.io",
 ];
 
 function randomDateString(): string {
@@ -74,24 +70,67 @@ function randomTimeString(): string {
   return `${hour}:${minute}`;
 }
 
+// ---------------------------------------------------------------------------
+// Profile-aware answer generators
+// ---------------------------------------------------------------------------
+
 /**
- * Generate a single random answer for a given form field.
+ * Returns a short-answer value that respects the user profile when the
+ * question text suggests a personal detail (name, email, age, etc.).
  */
-function randomAnswer(field: FormField): string | string[] {
+function profileAnswer(field: FormField, profile?: SyntheticProfile): string {
+  if (!profile) {
+    const q = field.question.toLowerCase();
+    if (q.includes("name")) return randomChoice(SYNTHETIC_PROFILES.map((p) => p.name));
+    if (q.includes("email")) return randomChoice(SYNTHETIC_PROFILES.map((p) => p.email));
+    if (q.includes("age")) return String(randomInt(18, 65));
+    if (q.includes("phone") || q.includes("mobile"))
+      return `+1${randomInt(2000000000, 9999999999)}`;
+    return randomChoice(RANDOM_SHORT_ANSWERS);
+  }
+
+  const q = field.question.toLowerCase();
+  if (q.includes("name")) return profile.name;
+  if (q.includes("email")) return profile.email;
+  if (q.includes("age")) return String(profile.age);
+  if (q.includes("gender")) return profile.gender;
+  if (q.includes("occupation") || q.includes("job") || q.includes("profession"))
+    return profile.occupation;
+  if (q.includes("education") || q.includes("qualification"))
+    return profile.education;
+  if (q.includes("location") || q.includes("city") || q.includes("country"))
+    return profile.location;
+  if (q.includes("phone") || q.includes("mobile"))
+    return `+1${randomInt(2000000000, 9999999999)}`;
+
+  return randomChoice(RANDOM_SHORT_ANSWERS);
+}
+
+/**
+ * Generates a single answer for a form field, respecting profile details and
+ * optional MCQ weights.
+ */
+function generateAnswer(
+  field: FormField,
+  profile?: SyntheticProfile,
+  weights?: OptionWeights
+): string | string[] {
   switch (field.type) {
     case "multiple_choice":
     case "dropdown":
       if (field.options && field.options.length > 0) {
-        return randomChoice(field.options);
+        return weightedChoice(field.options, weights);
       }
       return randomChoice(RANDOM_SHORT_ANSWERS);
 
     case "checkboxes":
       if (field.options && field.options.length > 0) {
-        // Pick 1–3 options at random
         const count = randomInt(1, Math.min(3, field.options.length));
-        const shuffled = [...field.options].sort(() => Math.random() - 0.5);
-        return shuffled.slice(0, count);
+        // Apply weights by sorting with weighted probability
+        const sorted = field.options
+          .map((opt) => ({ opt, w: weights?.[opt] ?? 1 }))
+          .sort((a, b) => b.w * Math.random() - a.w * Math.random());
+        return sorted.slice(0, count).map((x) => x.opt);
       }
       return [randomChoice(RANDOM_SHORT_ANSWERS)];
 
@@ -101,7 +140,19 @@ function randomAnswer(field: FormField): string | string[] {
     case "linear_scale": {
       const min = field.scaleMin ?? 1;
       const max = field.scaleMax ?? 5;
-      return String(randomInt(min, max));
+      const scaleOptions = Array.from({ length: max - min + 1 }, (_, i) =>
+        String(min + i)
+      );
+      if (weights && Object.keys(weights).length > 0) {
+        return weightedChoice(scaleOptions, weights);
+      }
+      // Default: realistic bell-curve-ish distribution skewing positive
+      const defaultWeights: OptionWeights = {};
+      scaleOptions.forEach((opt, idx) => {
+        const pos = idx / (scaleOptions.length - 1); // 0 → 1
+        defaultWeights[opt] = Math.round(5 + pos * 15); // 5 to 20
+      });
+      return weightedChoice(scaleOptions, defaultWeights);
     }
 
     case "date":
@@ -111,17 +162,8 @@ function randomAnswer(field: FormField): string | string[] {
       return randomTimeString();
 
     case "short_answer":
-    default: {
-      // Heuristic: guess the field intent from the question text
-      const q = field.question.toLowerCase();
-      if (q.includes("name")) return randomChoice(RANDOM_NAMES);
-      if (q.includes("email")) return randomChoice(RANDOM_EMAILS);
-      if (q.includes("age")) return String(randomInt(18, 65));
-      if (q.includes("phone") || q.includes("mobile")) {
-        return `+1${randomInt(2000000000, 9999999999)}`;
-      }
-      return randomChoice(RANDOM_SHORT_ANSWERS);
-    }
+    default:
+      return profileAnswer(field, profile);
   }
 }
 
@@ -131,14 +173,25 @@ function randomAnswer(field: FormField): string | string[] {
 
 export function generateRandomResponses(
   fields: FormField[],
-  count: number
+  count: number,
+  fieldWeights?: Record<string, OptionWeights>
 ): GeneratedResponse[] {
-  return Array.from({ length: count }, () => {
+  return Array.from({ length: count }, (_, i) => {
+    const profile = getProfile(i);
     const entries: Record<string, string | string[]> = {};
+
     for (const field of fields) {
-      entries[`entry.${field.entryId}`] = randomAnswer(field);
+      entries[`entry.${field.entryId}`] = generateAnswer(
+        field,
+        profile,
+        fieldWeights?.[field.entryId]
+      );
     }
-    return { entries };
+
+    return {
+      entries,
+      profile: { id: profile.id, name: profile.name, age: profile.age, occupation: profile.occupation },
+    };
   });
 }
 
@@ -146,33 +199,32 @@ export function generateRandomResponses(
 // CSV mode
 // ---------------------------------------------------------------------------
 
-/**
- * Maps CSV column headers to form fields using case-insensitive partial
- * matching against the field question text, then generates one response per
- * CSV row (cycling through rows if count > rows.length).
- */
 export function generateCsvResponses(
   fields: FormField[],
   count: number,
-  csvData: Record<string, string>[]
+  csvData: Record<string, string>[],
+  fieldWeights?: Record<string, OptionWeights>
 ): GeneratedResponse[] {
   if (csvData.length === 0) {
-    return generateRandomResponses(fields, count);
+    return generateRandomResponses(fields, count, fieldWeights);
   }
 
   const responses: GeneratedResponse[] = [];
 
   for (let i = 0; i < count; i++) {
     const row = csvData[i % csvData.length];
+    const profile = getProfile(i);
     const entries: Record<string, string | string[]> = {};
 
     for (const field of fields) {
-      // Try to find a matching CSV column for this field
       const questionLower = field.question.toLowerCase();
       let matched = false;
 
       for (const [col, val] of Object.entries(row)) {
-        if (questionLower.includes(col.toLowerCase()) || col.toLowerCase().includes(questionLower)) {
+        if (
+          questionLower.includes(col.toLowerCase()) ||
+          col.toLowerCase().includes(questionLower)
+        ) {
           entries[`entry.${field.entryId}`] = val;
           matched = true;
           break;
@@ -180,90 +232,127 @@ export function generateCsvResponses(
       }
 
       if (!matched) {
-        // Fall back to random
-        entries[`entry.${field.entryId}`] = randomAnswer(field);
+        entries[`entry.${field.entryId}`] = generateAnswer(
+          field,
+          profile,
+          fieldWeights?.[field.entryId]
+        );
       }
     }
 
-    responses.push({ entries });
+    responses.push({
+      entries,
+      profile: { id: profile.id, name: profile.name, age: profile.age, occupation: profile.occupation },
+    });
   }
 
   return responses;
 }
 
 // ---------------------------------------------------------------------------
-// AI mode
+// AI mode — profile-aware prompts
 // ---------------------------------------------------------------------------
 
-/**
- * Generate AI-powered responses via OpenAI.
- * Falls back to random if the API key is not configured.
- */
 export async function generateAiResponses(
   fields: FormField[],
-  count: number
+  count: number,
+  fieldWeights?: Record<string, OptionWeights>
 ): Promise<GeneratedResponse[]> {
   const apiKey = process.env.OPENAI_API_KEY;
 
   if (!apiKey) {
-    // No API key — fall back to random
-    return generateRandomResponses(fields, count);
+    return generateRandomResponses(fields, count, fieldWeights);
   }
 
-  // Build a prompt that describes all the fields
   const fieldDescriptions = fields
     .map(
       (f, idx) =>
-        `${idx + 1}. [${f.type}] ${f.question}${
-          f.options ? ` (options: ${f.options.join(", ")})` : ""
-        }${f.type === "linear_scale" ? ` (scale ${f.scaleMin}–${f.scaleMax})` : ""}`
+        `${idx + 1}. [${f.type}] ${f.question}` +
+        (f.options ? ` (options: ${f.options.join(", ")})` : "") +
+        (f.type === "linear_scale"
+          ? ` (scale ${f.scaleMin ?? 1}–${f.scaleMax ?? 5})`
+          : "")
     )
     .join("\n");
 
-  const prompt = `You are generating realistic survey responses for a Google Form.
+  const { default: OpenAI } = await import("openai");
+  const client = new OpenAI({ apiKey });
+  const responses: GeneratedResponse[] = [];
+
+  for (let i = 0; i < count; i++) {
+    const profile = getProfile(i);
+
+    const prompt = `You are simulating a realistic survey response for form testing purposes.
+
+Respondent profile:
+- Name: ${profile.name}
+- Age: ${profile.age}
+- Occupation: ${profile.occupation}
+- Education: ${profile.education}
+- Location: ${profile.location}
+- Gender: ${profile.gender}
 
 Form fields:
 ${fieldDescriptions}
 
-Generate ${count} separate, realistic responses. Return a JSON array with ${count} objects.
-Each object should have keys that are the field question text (exactly as written) and values that are the answer.
-For checkboxes, provide an array of selected options.
-For multiple choice and dropdowns, pick exactly one from the given options.
-For linear scale, return a number within the valid range.
-For date fields, return a date in YYYY-MM-DD format.
-For time fields, return a time in HH:MM format.
-Return ONLY valid JSON, no additional text.`;
+Generate ONE realistic response as this respondent. Return a JSON object where keys are the exact field question text and values are the answer.
+Rules:
+- For multiple_choice / dropdown: pick exactly one option from the list provided.
+- For checkboxes: return an array of 1–3 selected options from the list.
+- For linear_scale: return a number within the valid range as a string.
+- For date: return YYYY-MM-DD format.
+- For time: return HH:MM format.
+- For name/email/age fields: use the respondent profile details above.
+- For open-ended questions: write a realistic answer matching the respondent's profile.
+Return ONLY valid JSON, no extra text.`;
 
-  try {
-    const { default: OpenAI } = await import("openai");
-    const client = new OpenAI({ apiKey });
+    try {
+      const completion = await client.chat.completions.create({
+        model: "gpt-3.5-turbo",
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0.85,
+      });
 
-    const completion = await client.chat.completions.create({
-      model: "gpt-3.5-turbo",
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0.9,
-    });
+      const content = completion.choices[0]?.message?.content ?? "{}";
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const answerMap: Record<string, any> = JSON.parse(content);
 
-    const content = completion.choices[0]?.message?.content ?? "[]";
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const aiAnswers: Record<string, any>[] = JSON.parse(content);
-
-    return aiAnswers.map((answerMap) => {
       const entries: Record<string, string | string[]> = {};
       for (const field of fields) {
         const aiValue = answerMap[field.question];
-        if (aiValue !== undefined) {
+        if (aiValue !== undefined && aiValue !== null) {
           entries[`entry.${field.entryId}`] = Array.isArray(aiValue)
             ? (aiValue as string[]).map(String)
             : String(aiValue);
         } else {
-          entries[`entry.${field.entryId}`] = randomAnswer(field);
+          entries[`entry.${field.entryId}`] = generateAnswer(
+            field,
+            profile,
+            fieldWeights?.[field.entryId]
+          );
         }
       }
-      return { entries };
-    });
-  } catch {
-    // If AI fails, fall back to random
-    return generateRandomResponses(fields, count);
+
+      responses.push({
+        entries,
+        profile: { id: profile.id, name: profile.name, age: profile.age, occupation: profile.occupation },
+      });
+    } catch {
+      // Fall back to random for this individual response
+      const entries: Record<string, string | string[]> = {};
+      for (const field of fields) {
+        entries[`entry.${field.entryId}`] = generateAnswer(
+          field,
+          profile,
+          fieldWeights?.[field.entryId]
+        );
+      }
+      responses.push({
+        entries,
+        profile: { id: profile.id, name: profile.name, age: profile.age, occupation: profile.occupation },
+      });
+    }
   }
+
+  return responses;
 }

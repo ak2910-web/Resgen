@@ -10,7 +10,7 @@ export async function POST(req: NextRequest) {
   try {
     const body = (await req.json()) as GenerateRequest;
 
-    const { fields, mode, count, csvData } = body;
+    const { fields, mode, count, csvData, fieldWeights } = body;
 
     if (!fields || !Array.isArray(fields) || fields.length === 0) {
       return NextResponse.json(
@@ -30,7 +30,7 @@ export async function POST(req: NextRequest) {
 
     switch (mode) {
       case "random":
-        responses = generateRandomResponses(fields, count);
+        responses = generateRandomResponses(fields, count, fieldWeights);
         break;
 
       case "csv":
@@ -40,11 +40,11 @@ export async function POST(req: NextRequest) {
             { status: 400 }
           );
         }
-        responses = generateCsvResponses(fields, count, csvData);
+        responses = generateCsvResponses(fields, count, csvData, fieldWeights);
         break;
 
       case "ai":
-        responses = await generateAiResponses(fields, count);
+        responses = await generateAiResponses(fields, count, fieldWeights);
         break;
 
       default:
